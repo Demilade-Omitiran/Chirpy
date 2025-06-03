@@ -1,13 +1,39 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"sync/atomic"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+}
+
+func respondWithError(responseWriter http.ResponseWriter, code int, message string) {
+	type responseBody struct {
+		Err string `json:"error"`
+	}
+
+	respBody := responseBody{}
+
+	respBody.Err = message
+	data, _ := json.Marshal(respBody)
+
+	responseWriter.Header().Set("Content-Type", "application/json")
+	responseWriter.WriteHeader(code)
+	responseWriter.Write(data)
+}
+
+func respondWithJSON(responseWriter http.ResponseWriter, code int, payload interface{}) {
+	data, _ := json.Marshal(payload)
+
+	responseWriter.Header().Set("Content-Type", "application/json")
+	responseWriter.WriteHeader(code)
+	responseWriter.Write(data)
 }
 
 func (config *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -27,9 +53,57 @@ func healthHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	responseWriter.Write([]byte("OK"))
 }
 
+func validateChirpHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	type parameters struct {
+		Body string `json:"body"`
+	}
+
+	type responseBody struct {
+		CleanedBody string `json:"cleaned_body"`
+	}
+
+	decoder := json.NewDecoder(request.Body)
+	params := parameters{}
+	respBody := responseBody{}
+
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respondWithError(responseWriter, 400, "Chirp is too long")
+		return
+	}
+
+	bodyWords := strings.Split(params.Body, " ")
+	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+	cleanBodySlice := []string{}
+
+	for _, word := range bodyWords {
+		if slices.Contains(profaneWords, strings.ToLower(word)) {
+			cleanBodySlice = append(cleanBodySlice, "****")
+			continue
+		}
+
+		cleanBodySlice = append(cleanBodySlice, word)
+	}
+
+	respBody.CleanedBody = strings.Join(cleanBodySlice, " ")
+
+	respondWithJSON(responseWriter, 200, respBody)
+}
+
 func (config *apiConfig) hitsHandler(responseWriter http.ResponseWriter, _ *http.Request) {
 	responseWriter.WriteHeader(200)
-	responseWriter.Write(fmt.Appendf(nil, "Hits: %v", config.fileserverHits.Load()))
+	responseWriter.Write(fmt.Appendf(nil, `
+		<html>
+			<body>
+				<h1>Welcome, Chirpy Admin</h1>
+				<p>Chirpy has been visited %d times!</p>
+			</body>
+		</html>
+	`, config.fileserverHits.Load()))
 }
 
 func (config *apiConfig) resetHandler(responseWriter http.ResponseWriter, _ *http.Request) {
@@ -46,8 +120,10 @@ func main() {
 
 	mux.HandleFunc("GET /api/healthz", healthHandler)
 
-	mux.HandleFunc("GET /api/metrics", config.hitsHandler)
-	mux.HandleFunc("POST /api/reset", config.resetHandler)
+	mux.HandleFunc("GET /admin/metrics", config.hitsHandler)
+	mux.HandleFunc("POST /admin/reset", config.resetHandler)
+
+	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
 
 	server := http.Server{
 		Handler: mux,
