@@ -1,16 +1,25 @@
 package main
 
 import (
+	"chirpy/internal/database"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func respondWithError(responseWriter http.ResponseWriter, code int, message string) {
@@ -112,7 +121,19 @@ func (config *apiConfig) resetHandler(responseWriter http.ResponseWriter, _ *htt
 }
 
 func main() {
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+
+	db, err := sql.Open("postgres", dbURL)
+
+	if err != nil {
+		log.Fatal("Error connecting to database")
+	}
+
 	var config apiConfig
+
+	config.dbQueries = database.New(db)
 
 	mux := http.NewServeMux()
 
@@ -130,7 +151,7 @@ func main() {
 		Addr:    ":8080",
 	}
 
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 
 	if err != nil {
 		fmt.Println(err)
