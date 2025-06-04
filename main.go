@@ -11,6 +11,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/joho/godotenv"
 
@@ -20,6 +23,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func respondWithError(responseWriter http.ResponseWriter, code int, message string) {
@@ -62,18 +66,84 @@ func healthHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	responseWriter.Write([]byte("OK"))
 }
 
-func validateChirpHandler(responseWriter http.ResponseWriter, request *http.Request) {
+func (config *apiConfig) hitsHandler(responseWriter http.ResponseWriter, _ *http.Request) {
+	responseWriter.WriteHeader(200)
+	responseWriter.Write(fmt.Appendf(nil, `
+		<html>
+			<body>
+				<h1>Welcome, Chirpy Admin</h1>
+				<p>Chirpy has been visited %d times!</p>
+			</body>
+		</html>
+	`, config.fileserverHits.Load()))
+}
+
+func (config *apiConfig) resetHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	if config.platform == "dev" {
+		responseWriter.WriteHeader(403)
+		return
+	}
+
+	config.fileserverHits.Store(0)
+
+	err := config.dbQueries.Reset(request.Context())
+
+	if err != nil {
+		responseWriter.WriteHeader(500)
+		return
+	}
+
+	responseWriter.WriteHeader(200)
+}
+
+func (config *apiConfig) userHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	type parameters struct {
-		Body string `json:"body"`
+		Email string `json:"email"`
 	}
 
 	type responseBody struct {
-		CleanedBody string `json:"cleaned_body"`
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
 	params := parameters{}
-	respBody := responseBody{}
+
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	createdUser, err := config.dbQueries.CreateUser(request.Context(), params.Email)
+
+	if err != nil {
+		respondWithError(responseWriter, 400, err.Error())
+		return
+	}
+
+	respBody := responseBody(createdUser)
+
+	respondWithJSON(responseWriter, 201, respBody)
+}
+
+func (config *apiConfig) chirpHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	type parameters struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
+	}
+
+	type responseBody struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserID    uuid.UUID `json:"user_id"`
+	}
+
+	decoder := json.NewDecoder(request.Body)
+	params := parameters{}
 
 	if err := decoder.Decode(&params); err != nil {
 		respondWithError(responseWriter, 500, "Something went wrong")
@@ -98,26 +168,72 @@ func validateChirpHandler(responseWriter http.ResponseWriter, request *http.Requ
 		cleanBodySlice = append(cleanBodySlice, word)
 	}
 
-	respBody.CleanedBody = strings.Join(cleanBodySlice, " ")
+	cleanedBody := strings.Join(cleanBodySlice, " ")
 
-	respondWithJSON(responseWriter, 200, respBody)
+	chirp, err := config.dbQueries.CreateChirp(request.Context(), database.CreateChirpParams{
+		Body:   cleanedBody,
+		UserID: params.UserID,
+	})
+
+	if err != nil {
+		respondWithError(responseWriter, 400, err.Error())
+	}
+
+	respondWithJSON(responseWriter, 201, responseBody(chirp))
 }
 
-func (config *apiConfig) hitsHandler(responseWriter http.ResponseWriter, _ *http.Request) {
-	responseWriter.WriteHeader(200)
-	responseWriter.Write(fmt.Appendf(nil, `
-		<html>
-			<body>
-				<h1>Welcome, Chirpy Admin</h1>
-				<p>Chirpy has been visited %d times!</p>
-			</body>
-		</html>
-	`, config.fileserverHits.Load()))
+func (config *apiConfig) getChirpsHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	type chirpJson struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserID    uuid.UUID `json:"user_id"`
+	}
+
+	responseBody := []chirpJson{}
+
+	chirps, err := config.dbQueries.GetChirps(request.Context())
+
+	if err != nil {
+		respondWithError(responseWriter, 400, err.Error())
+	}
+
+	for _, chirp := range chirps {
+		responseBody = append(responseBody, chirpJson(chirp))
+	}
+
+	respondWithJSON(responseWriter, 200, responseBody)
 }
 
-func (config *apiConfig) resetHandler(responseWriter http.ResponseWriter, _ *http.Request) {
-	config.fileserverHits.Store(0)
-	responseWriter.WriteHeader(200)
+func (config *apiConfig) getChirpByIDHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	param := request.PathValue("chirpID")
+
+	if param == "" {
+		respondWithError(responseWriter, 404, "chirpID is required")
+	}
+
+	type responseBody struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserID    uuid.UUID `json:"user_id"`
+	}
+
+	chirpID, err := uuid.Parse(param)
+
+	if err != nil {
+		respondWithError(responseWriter, 404, "invalid chirpID")
+	}
+
+	chirp, err := config.dbQueries.GetChirpByID(request.Context(), chirpID)
+
+	if err != nil {
+		respondWithError(responseWriter, 404, err.Error())
+	}
+
+	respondWithJSON(responseWriter, 200, responseBody(chirp))
 }
 
 func main() {
@@ -135,6 +251,8 @@ func main() {
 
 	config.dbQueries = database.New(db)
 
+	config.platform = os.Getenv("PLATFORM")
+
 	mux := http.NewServeMux()
 
 	mux.Handle("/app/", config.middlewareMetricsInc(appFileServerHandler()))
@@ -144,7 +262,11 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", config.hitsHandler)
 	mux.HandleFunc("POST /admin/reset", config.resetHandler)
 
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("POST /api/chirps", config.chirpHandler)
+	mux.HandleFunc("GET /api/chirps", config.getChirpsHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", config.getChirpByIDHandler)
+
+	mux.HandleFunc("POST /api/users", config.userHandler)
 
 	server := http.Server{
 		Handler: mux,
