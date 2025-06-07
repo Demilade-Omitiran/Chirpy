@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chirpy/internal/auth"
 	"chirpy/internal/database"
 	"database/sql"
 	"encoding/json"
@@ -24,6 +25,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 func respondWithError(responseWriter http.ResponseWriter, code int, message string) {
@@ -98,7 +100,8 @@ func (config *apiConfig) resetHandler(responseWriter http.ResponseWriter, reques
 
 func (config *apiConfig) userHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type responseBody struct {
@@ -110,28 +113,103 @@ func (config *apiConfig) userHandler(responseWriter http.ResponseWriter, request
 
 	decoder := json.NewDecoder(request.Body)
 	params := parameters{}
+	respBody := responseBody{}
 
 	if err := decoder.Decode(&params); err != nil {
 		respondWithError(responseWriter, 500, "Something went wrong")
 		return
 	}
 
-	createdUser, err := config.dbQueries.CreateUser(request.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	createdUser, err := config.dbQueries.CreateUser(request.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
 
 	if err != nil {
 		respondWithError(responseWriter, 400, err.Error())
 		return
 	}
 
-	respBody := responseBody(createdUser)
+	respBody.ID = createdUser.ID
+	respBody.CreatedAt = createdUser.CreatedAt
+	respBody.UpdatedAt = createdUser.UpdatedAt
+	respBody.Email = createdUser.Email
 
 	respondWithJSON(responseWriter, 201, respBody)
 }
 
+func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	type parameters struct {
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
+	}
+
+	type responseBody struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}
+
+	decoder := json.NewDecoder(request.Body)
+	params := parameters{}
+	respBody := responseBody{}
+
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	user, err := config.dbQueries.GetUserByEmail(request.Context(), params.Email)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Incorrect email or password")
+		return
+	}
+
+	err = auth.CheckPasswordHash(user.HashedPassword, params.Password)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Incorrect email or password")
+		return
+	}
+
+	var tokenExpiry time.Duration
+
+	if params.ExpiresInSeconds == 0 {
+		tokenExpiry = 1 * time.Hour
+	} else {
+		tokenExpiry = time.Duration(params.ExpiresInSeconds) * time.Second
+	}
+
+	token, err := auth.MakeJWT(user.ID, config.jwtSecret, tokenExpiry)
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	respBody.ID = user.ID
+	respBody.CreatedAt = user.CreatedAt
+	respBody.UpdatedAt = user.UpdatedAt
+	respBody.Email = user.Email
+	respBody.Token = token
+
+	respondWithJSON(responseWriter, 200, respBody)
+}
+
 func (config *apiConfig) chirpHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type responseBody struct {
@@ -140,6 +218,20 @@ func (config *apiConfig) chirpHandler(responseWriter http.ResponseWriter, reques
 		UpdatedAt time.Time `json:"updated_at"`
 		Body      string    `json:"body"`
 		UserID    uuid.UUID `json:"user_id"`
+	}
+
+	token, err := auth.GetBearerToken(request.Header)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, config.jwtSecret)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -172,11 +264,12 @@ func (config *apiConfig) chirpHandler(responseWriter http.ResponseWriter, reques
 
 	chirp, err := config.dbQueries.CreateChirp(request.Context(), database.CreateChirpParams{
 		Body:   cleanedBody,
-		UserID: params.UserID,
+		UserID: userID,
 	})
 
 	if err != nil {
 		respondWithError(responseWriter, 400, err.Error())
+		return
 	}
 
 	respondWithJSON(responseWriter, 201, responseBody(chirp))
@@ -197,6 +290,7 @@ func (config *apiConfig) getChirpsHandler(responseWriter http.ResponseWriter, re
 
 	if err != nil {
 		respondWithError(responseWriter, 400, err.Error())
+		return
 	}
 
 	for _, chirp := range chirps {
@@ -211,6 +305,7 @@ func (config *apiConfig) getChirpByIDHandler(responseWriter http.ResponseWriter,
 
 	if param == "" {
 		respondWithError(responseWriter, 404, "chirpID is required")
+		return
 	}
 
 	type responseBody struct {
@@ -225,12 +320,14 @@ func (config *apiConfig) getChirpByIDHandler(responseWriter http.ResponseWriter,
 
 	if err != nil {
 		respondWithError(responseWriter, 404, "invalid chirpID")
+		return
 	}
 
 	chirp, err := config.dbQueries.GetChirpByID(request.Context(), chirpID)
 
 	if err != nil {
 		respondWithError(responseWriter, 404, err.Error())
+		return
 	}
 
 	respondWithJSON(responseWriter, 200, responseBody(chirp))
@@ -253,6 +350,8 @@ func main() {
 
 	config.platform = os.Getenv("PLATFORM")
 
+	config.jwtSecret = os.Getenv("JWT_SECRET")
+
 	mux := http.NewServeMux()
 
 	mux.Handle("/app/", config.middlewareMetricsInc(appFileServerHandler()))
@@ -267,6 +366,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpID}", config.getChirpByIDHandler)
 
 	mux.HandleFunc("POST /api/users", config.userHandler)
+	mux.HandleFunc("POST /api/login", config.loginHandler)
 
 	server := http.Server{
 		Handler: mux,
