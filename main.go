@@ -147,17 +147,17 @@ func (config *apiConfig) userHandler(responseWriter http.ResponseWriter, request
 
 func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	type parameters struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type responseBody struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-		Token     string    `json:"token"`
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -183,15 +183,25 @@ func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, reques
 		return
 	}
 
-	var tokenExpiry time.Duration
+	token, err := auth.MakeJWT(user.ID, config.jwtSecret)
 
-	if params.ExpiresInSeconds == 0 {
-		tokenExpiry = 1 * time.Hour
-	} else {
-		tokenExpiry = time.Duration(params.ExpiresInSeconds) * time.Second
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
 	}
 
-	token, err := auth.MakeJWT(user.ID, config.jwtSecret, tokenExpiry)
+	refreshToken, err := auth.MakeRefreshToken()
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	err = config.dbQueries.CreateRefreshToken(request.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(60 * 24 * time.Hour),
+	})
 
 	if err != nil {
 		respondWithError(responseWriter, 500, "Something went wrong")
@@ -203,8 +213,77 @@ func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, reques
 	respBody.UpdatedAt = user.UpdatedAt
 	respBody.Email = user.Email
 	respBody.Token = token
+	respBody.RefreshToken = refreshToken
 
 	respondWithJSON(responseWriter, 200, respBody)
+}
+
+func (config *apiConfig) refreshHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	refreshToken, err := auth.GetBearerToken(request.Header)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	refreshTokenRecord, err := config.dbQueries.GetRefreshToken(request.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	if refreshTokenRecord.RevokedAt.Valid {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	if time.Now().Compare(refreshTokenRecord.ExpiresAt) >= 0 {
+		respondWithError(responseWriter, 401, "Expired token. Please log in to perform this action")
+		return
+	}
+
+	token, err := auth.MakeJWT(refreshTokenRecord.UserID, config.jwtSecret)
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	type responseBody struct {
+		Token string `json:"token"`
+	}
+
+	payload := responseBody{
+		Token: token,
+	}
+
+	respondWithJSON(responseWriter, 200, payload)
+}
+
+func (config *apiConfig) revokeHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	refreshToken, err := auth.GetBearerToken(request.Header)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	_, err = config.dbQueries.GetRefreshToken(request.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	err = config.dbQueries.RevokeRefreshToken(request.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	responseWriter.WriteHeader(204)
 }
 
 func (config *apiConfig) chirpHandler(responseWriter http.ResponseWriter, request *http.Request) {
@@ -367,6 +446,9 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", config.userHandler)
 	mux.HandleFunc("POST /api/login", config.loginHandler)
+
+	mux.HandleFunc("POST /api/refresh", config.refreshHandler)
+	mux.HandleFunc("POST /api/revoke", config.revokeHandler)
 
 	server := http.Server{
 		Handler: mux,
