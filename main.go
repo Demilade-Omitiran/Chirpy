@@ -268,6 +268,26 @@ func (config *apiConfig) updateUserHandler(responseWriter http.ResponseWriter, r
 		respondWithError(responseWriter, 500, "Something went wrong")
 		return
 	}
+
+	updatedUser, err := config.dbQueries.UpdateUser(request.Context(), database.UpdateUserParams{
+		ID:             userID,
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
+
+	if err != nil {
+		respondWithError(responseWriter, 400, err.Error())
+		return
+	}
+
+	respBody := responseBody{}
+
+	respBody.ID = updatedUser.ID
+	respBody.CreatedAt = updatedUser.CreatedAt
+	respBody.UpdatedAt = updatedUser.UpdatedAt
+	respBody.Email = updatedUser.Email
+
+	respondWithJSON(responseWriter, 200, respBody)
 }
 
 func (config *apiConfig) refreshHandler(responseWriter http.ResponseWriter, request *http.Request) {
@@ -495,7 +515,7 @@ func main() {
 	mux.HandleFunc("POST /api/refresh", config.refreshHandler)
 	mux.HandleFunc("POST /api/revoke", config.revokeHandler)
 
-	mux.HandleFunc("PUT /api/users", config.revokeHandler)
+	mux.HandleFunc("PUT /api/users", config.updateUserHandler)
 
 	server := http.Server{
 		Handler: mux,
