@@ -51,6 +51,22 @@ func respondWithJSON(responseWriter http.ResponseWriter, code int, payload inter
 	responseWriter.Write(data)
 }
 
+func (config *apiConfig) validateAccessToken(header http.Header) (uuid.UUID, error) {
+	token, err := auth.GetBearerToken(header)
+
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+
+	userID, err := auth.ValidateJWT(token, config.jwtSecret)
+
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+
+	return userID, nil
+}
+
 func (config *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		config.fileserverHits.Add(1)
@@ -218,6 +234,42 @@ func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, reques
 	respondWithJSON(responseWriter, 200, respBody)
 }
 
+func (config *apiConfig) updateUserHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, err := config.validateAccessToken(request.Header)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	type responseBody struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
+
+	decoder := json.NewDecoder(request.Body)
+	params := parameters{}
+
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+}
+
 func (config *apiConfig) refreshHandler(responseWriter http.ResponseWriter, request *http.Request) {
 	refreshToken, err := auth.GetBearerToken(request.Header)
 
@@ -299,14 +351,7 @@ func (config *apiConfig) chirpHandler(responseWriter http.ResponseWriter, reques
 		UserID    uuid.UUID `json:"user_id"`
 	}
 
-	token, err := auth.GetBearerToken(request.Header)
-
-	if err != nil {
-		respondWithError(responseWriter, 401, "Please log in to perform this action")
-		return
-	}
-
-	userID, err := auth.ValidateJWT(token, config.jwtSecret)
+	userID, err := config.validateAccessToken(request.Header)
 
 	if err != nil {
 		respondWithError(responseWriter, 401, "Please log in to perform this action")
@@ -449,6 +494,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/refresh", config.refreshHandler)
 	mux.HandleFunc("POST /api/revoke", config.revokeHandler)
+
+	mux.HandleFunc("PUT /api/users", config.revokeHandler)
 
 	server := http.Server{
 		Handler: mux,
