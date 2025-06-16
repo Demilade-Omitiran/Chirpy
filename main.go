@@ -121,10 +121,11 @@ func (config *apiConfig) userHandler(responseWriter http.ResponseWriter, request
 	}
 
 	type responseBody struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -157,6 +158,7 @@ func (config *apiConfig) userHandler(responseWriter http.ResponseWriter, request
 	respBody.CreatedAt = createdUser.CreatedAt
 	respBody.UpdatedAt = createdUser.UpdatedAt
 	respBody.Email = createdUser.Email
+	respBody.IsChirpyRed = createdUser.IsChirpyRed
 
 	respondWithJSON(responseWriter, 201, respBody)
 }
@@ -172,6 +174,7 @@ func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, reques
 		CreatedAt    time.Time `json:"created_at"`
 		UpdatedAt    time.Time `json:"updated_at"`
 		Email        string    `json:"email"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
 	}
@@ -228,6 +231,7 @@ func (config *apiConfig) loginHandler(responseWriter http.ResponseWriter, reques
 	respBody.CreatedAt = user.CreatedAt
 	respBody.UpdatedAt = user.UpdatedAt
 	respBody.Email = user.Email
+	respBody.IsChirpyRed = user.IsChirpyRed
 	respBody.Token = token
 	respBody.RefreshToken = refreshToken
 
@@ -248,10 +252,11 @@ func (config *apiConfig) updateUserHandler(responseWriter http.ResponseWriter, r
 	}
 
 	type responseBody struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -286,6 +291,7 @@ func (config *apiConfig) updateUserHandler(responseWriter http.ResponseWriter, r
 	respBody.CreatedAt = updatedUser.CreatedAt
 	respBody.UpdatedAt = updatedUser.UpdatedAt
 	respBody.Email = updatedUser.Email
+	respBody.IsChirpyRed = updatedUser.IsChirpyRed
 
 	respondWithJSON(responseWriter, 200, respBody)
 }
@@ -521,6 +527,37 @@ func (config *apiConfig) deleteChirpHandler(responseWriter http.ResponseWriter, 
 	responseWriter.WriteHeader(204)
 }
 
+func (config *apiConfig) polkaWebhookHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	decoder := json.NewDecoder(request.Body)
+	params := parameters{}
+
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(responseWriter, 500, "Something went wrong")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		responseWriter.WriteHeader(204)
+		return
+	}
+
+	_, err := config.dbQueries.UpgradeUserToChirpyRed(request.Context(), params.Data.UserID)
+
+	if err != nil {
+		respondWithError(responseWriter, 404, "Something went wrong")
+		return
+	}
+
+	responseWriter.WriteHeader(204)
+}
+
 func main() {
 	godotenv.Load()
 
@@ -561,6 +598,8 @@ func main() {
 	mux.HandleFunc("POST /api/revoke", config.revokeHandler)
 
 	mux.HandleFunc("PUT /api/users", config.updateUserHandler)
+
+	mux.HandleFunc("POST /api/polka/webhooks", config.polkaWebhookHandler)
 
 	server := http.Server{
 		Handler: mux,
