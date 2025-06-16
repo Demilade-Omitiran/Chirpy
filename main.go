@@ -477,6 +477,50 @@ func (config *apiConfig) getChirpByIDHandler(responseWriter http.ResponseWriter,
 	respondWithJSON(responseWriter, 200, responseBody(chirp))
 }
 
+func (config *apiConfig) deleteChirpHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, err := config.validateAccessToken(request.Header)
+
+	if err != nil {
+		respondWithError(responseWriter, 401, "Please log in to perform this action")
+		return
+	}
+
+	param := request.PathValue("chirpID")
+
+	if param == "" {
+		respondWithError(responseWriter, 404, "chirpID is required")
+		return
+	}
+
+	chirpID, err := uuid.Parse(param)
+
+	if err != nil {
+		respondWithError(responseWriter, 404, "invalid chirpID")
+		return
+	}
+
+	chirp, err := config.dbQueries.GetChirpByID(request.Context(), chirpID)
+
+	if err != nil {
+		respondWithError(responseWriter, 404, "Chirp does not exist")
+		return
+	}
+
+	if chirp.UserID != userID {
+		respondWithError(responseWriter, 403, "You are not the author of this chirp")
+		return
+	}
+
+	err = config.dbQueries.DeleteChirp(request.Context(), chirp.ID)
+
+	if err != nil {
+		respondWithError(responseWriter, 500, "SOmething went wrong")
+		return
+	}
+
+	responseWriter.WriteHeader(204)
+}
+
 func main() {
 	godotenv.Load()
 
@@ -508,6 +552,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", config.chirpHandler)
 	mux.HandleFunc("GET /api/chirps", config.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", config.getChirpByIDHandler)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", config.deleteChirpHandler)
 
 	mux.HandleFunc("POST /api/users", config.userHandler)
 	mux.HandleFunc("POST /api/login", config.loginHandler)
