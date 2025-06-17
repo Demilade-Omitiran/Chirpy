@@ -81,15 +81,13 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 }
 
 func GetBearerToken(headers http.Header) (string, error) {
-	authHeader := strings.TrimSpace(headers.Get("Authorization"))
+	token, err := getAuthToken(headers, "Bearer")
 
-	splitAuthHeader := strings.Split(authHeader, " ")
-
-	if len(splitAuthHeader) != 2 || splitAuthHeader[0] != "Bearer" {
-		return "", fmt.Errorf("invalid auth header")
+	if err != nil {
+		return "", err
 	}
 
-	return splitAuthHeader[1], nil
+	return token, nil
 }
 
 func MakeRefreshToken() (string, error) {
@@ -99,4 +97,26 @@ func MakeRefreshToken() (string, error) {
 	encodedStr := hex.EncodeToString(key)
 
 	return encodedStr, nil
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	token, err := getAuthToken(headers, "ApiKey")
+
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func getAuthToken(headers http.Header, firstAuthWord string) (string, error) {
+	authHeader := strings.TrimSpace(headers.Get("Authorization"))
+
+	splitAuthHeader := strings.Split(authHeader, " ")
+
+	if len(splitAuthHeader) != 2 || splitAuthHeader[0] != firstAuthWord {
+		return "", fmt.Errorf("invalid auth header")
+	}
+
+	return splitAuthHeader[1], nil
 }

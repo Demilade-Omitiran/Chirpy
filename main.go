@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 func respondWithError(responseWriter http.ResponseWriter, code int, message string) {
@@ -72,6 +74,20 @@ func (config *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 		config.fileserverHits.Add(1)
 		next.ServeHTTP(responseWriter, request)
 	})
+}
+
+func (config *apiConfig) validateApiKey(header http.Header) error {
+	apiKey, err := auth.GetAPIKey(header)
+
+	if err != nil {
+		return err
+	}
+
+	if apiKey != config.polkaKey {
+		return fmt.Errorf("invalid api key")
+	}
+
+	return nil
 }
 
 func appFileServerHandler() http.Handler {
@@ -436,6 +452,13 @@ func (config *apiConfig) getChirpsHandler(responseWriter http.ResponseWriter, re
 
 	responseBody := []chirpJson{}
 
+	authorID := request.URL.Query().Get("author_id")
+	sortParam := request.URL.Query().Get("sort")
+
+	if sortParam == "" {
+		sortParam = "asc"
+	}
+
 	chirps, err := config.dbQueries.GetChirps(request.Context())
 
 	if err != nil {
@@ -444,7 +467,13 @@ func (config *apiConfig) getChirpsHandler(responseWriter http.ResponseWriter, re
 	}
 
 	for _, chirp := range chirps {
-		responseBody = append(responseBody, chirpJson(chirp))
+		if (authorID == "") || (authorID == chirp.UserID.String()) {
+			responseBody = append(responseBody, chirpJson(chirp))
+		}
+	}
+
+	if sortParam == "desc" {
+		sort.Slice(responseBody, func(i, j int) bool { return responseBody[i].CreatedAt.After(responseBody[j].CreatedAt) })
 	}
 
 	respondWithJSON(responseWriter, 200, responseBody)
@@ -528,6 +557,14 @@ func (config *apiConfig) deleteChirpHandler(responseWriter http.ResponseWriter, 
 }
 
 func (config *apiConfig) polkaWebhookHandler(responseWriter http.ResponseWriter, request *http.Request) {
+	err := config.validateApiKey(request.Header)
+
+	if err != nil {
+		fmt.Println(err.Error())
+		responseWriter.WriteHeader(401)
+		return
+	}
+
 	type parameters struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -548,7 +585,7 @@ func (config *apiConfig) polkaWebhookHandler(responseWriter http.ResponseWriter,
 		return
 	}
 
-	_, err := config.dbQueries.UpgradeUserToChirpyRed(request.Context(), params.Data.UserID)
+	_, err = config.dbQueries.UpgradeUserToChirpyRed(request.Context(), params.Data.UserID)
 
 	if err != nil {
 		respondWithError(responseWriter, 404, "Something went wrong")
@@ -576,6 +613,8 @@ func main() {
 	config.platform = os.Getenv("PLATFORM")
 
 	config.jwtSecret = os.Getenv("JWT_SECRET")
+
+	config.polkaKey = os.Getenv("POLKA_KEY")
 
 	mux := http.NewServeMux()
 
